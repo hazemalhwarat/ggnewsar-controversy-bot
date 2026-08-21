@@ -11,6 +11,9 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const SEEN_FILE = 'data/seen.json';
 const DEDUPE_LOOKBACK_DAYS = 14;
 const MAX_NEW_PER_RUN = 40;
+// أي مقال أقدم من هذا العدد من الساعات (حسب تاريخ نشره الفعلي في المصدر) يُتجاهل
+// ولا يُنشر إطلاقاً، حتى لو كان "جديداً" بمعنى أن البوت لم يره من قبل.
+const MAX_ARTICLE_AGE_HOURS = 24;
 
 if (!DISCORD_WEBHOOK_URL) {
   console.error('متغير البيئة المطلوب مفقود: DISCORD_WEBHOOK_URL');
@@ -120,6 +123,16 @@ function pruneOld(seenMap) {
   for (const [id, ts] of Object.entries(seenMap)) {
     if (ts < cutoff) delete seenMap[id];
   }
+}
+
+// يتحقق أن المقال نُشر فعلياً خلال آخر MAX_ARTICLE_AGE_HOURS ساعة، بالاعتماد على
+// تاريخ النشر الحقيقي القادم من المصدر (وليس وقت اكتشاف البوت له).
+function isRecentEnough(article) {
+  if (!article.pubDate) return true; // نادراً ما يخلو المصدر من تاريخ نشر، نتركه يمر احترازياً
+  const published = new Date(article.pubDate);
+  if (Number.isNaN(published.getTime())) return true;
+  const ageMs = Date.now() - published.getTime();
+  return ageMs <= MAX_ARTICLE_AGE_HOURS * 60 * 60 * 1000;
 }
 
 // ------------------- التصنيف عبر كلمات مفتاحية محلية (بدون أي API خارجي) -------------------
@@ -292,16 +305,31 @@ async function main() {
   const isFirstRun = Object.keys(seenMap).length === 0;
 
   const articles = await fetchAllArticles();
-  const freshArticles = articles.filter((a) => a.link && !Object.prototype.hasOwnProperty.call(seenMap, a.link));
+  const notSeen = articles.filter((a) => a.link && !Object.prototype.hasOwnProperty.call(seenMap, a.link));
 
-  console.log(`مقالات مجلوبة: ${articles.length}، جديدة: ${freshArticles.length}`);
+  console.log(`مقالات مجلوبة: ${articles.length}، غير مسجلة سابقاً: ${notSeen.length}`);
 
   if (isFirstRun) {
-    freshArticles.forEach((a) => { seenMap[a.link] = Date.now(); });
+    notSeen.forEach((a) => { seenMap[a.link] = Date.now(); });
     saveSeen(seenMap);
-    console.log(`دورة التهيئة الأولى: تم تسجيل ${freshArticles.length} مقال كمقروء بدون نشر (لتفادي إغراق القناة بمحتوى قديم).`);
+    console.log(`دورة التهيئة الأولى: تم تسجيل ${notSeen.length} مقال كمقروء بدون نشر (لتفادي إغراق القناة بمحتوى قديم).`);
     return;
   }
+
+  // نفصل المقالات القديمة (أقدم من MAX_ARTICLE_AGE_HOURS) ونسجلها كمقروءة دون
+  // نشرها، والمقالات الحديثة فقط تمر للتصنيف والنشر.
+  let expiredOld = 0;
+  const freshArticles = [];
+  for (const article of notSeen) {
+    if (isRecentEnough(article)) {
+      freshArticles.push(article);
+    } else {
+      seenMap[article.link] = Date.now();
+      expiredOld += 1;
+    }
+  }
+
+  console.log(`جديدة خلال آخر ${MAX_ARTICLE_AGE_HOURS} ساعة: ${freshArticles.length}، أقدم من ذلك وتم تجاهلها: ${expiredOld}`);
 
   const toProcess = freshArticles.slice(0, MAX_NEW_PER_RUN);
   let included = 0, excluded = 0;
