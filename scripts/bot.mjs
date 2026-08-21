@@ -1,24 +1,19 @@
 // ===================================================================
-// GGNewsAR Controversy Bot — نسخة GitHub Actions (مجانية بالكامل)
+// GGNewsAR Controversy Bot — نسخة GitHub فقط (بدون أي خدمة ذكاء اصطناعي خارجية)
 // يرصد قضايا وجدل الرياضات الإلكترونية (لاعبون، فرق، دول) بعيداً عن نتائج المباريات
-// التصنيف عبر GitHub Models (مدمج داخل GitHub Actions، لا يحتاج أي حساب خارجي)
+// التصنيف: قواعد وكلمات مفتاحية محلية بالكامل، بدون أي API خارجي
 // التخزين: ملف data/seen.json داخل نفس الريبو
 // ===================================================================
 
 import fs from 'node:fs';
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const AI_MODEL = 'openai/gpt-4o-mini';
 const SEEN_FILE = 'data/seen.json';
 const DEDUPE_LOOKBACK_DAYS = 14;
-// حد متحفظ لعدد التصنيفات بكل تشغيلة، لأن GitHub Models له سقف طلبات يومي محدود
-// (حوالي 50 طلب/يوم لهذا النموذج). أي مقال يتجاوز الحد لا يُسجَّل كمقروء، فيُعاد
-// تصنيفه تلقائياً بالتشغيلة القادمة بدل أن يُفقد.
-const MAX_NEW_PER_RUN = 10;
+const MAX_NEW_PER_RUN = 40;
 
-if (!DISCORD_WEBHOOK_URL || !GITHUB_TOKEN) {
-  console.error('أحد متغيرات البيئة المطلوبة مفقود: DISCORD_WEBHOOK_URL, GITHUB_TOKEN');
+if (!DISCORD_WEBHOOK_URL) {
+  console.error('متغير البيئة المطلوب مفقود: DISCORD_WEBHOOK_URL');
   process.exit(1);
 }
 
@@ -127,129 +122,122 @@ function pruneOld(seenMap) {
   }
 }
 
-// ------------------- التصنيف عبر GitHub Models -------------------
-const SYSTEM_PROMPT = `أنت مساعد تصنيف لبوت رصد أخبار رياضات إلكترونية (إسبورتس) خاص بمنصة GGNewsAR.
-مهمتك الوحيدة: تقرأ عنوان وملخص مقال إخباري بالإنجليزية، وتقرر هل هذا المقال ضمن نطاق البوت أم لا، ثم تصنّفه.
+// ------------------- التصنيف عبر كلمات مفتاحية محلية (بدون أي API خارجي) -------------------
 
-نطاق البوت (استبعد كل ما لا يخصه):
-البوت مخصص فقط لما يخص القضايا واللاعبين والفرق والدول والجدل في عالم الإسبورتس. البوت لا يريد إطلاقاً أخبار نتائج المباريات والبطولات.
+// كلمات تدل على أن الخبر يقتصر على نتيجة مباراة أو بطولة (نستبعدها إلا إذا رافقها
+// شيء من قائمة القبول أدناه، مثل قضية أو تصريح مثير للجدل داخل نفس الخبر)
+const EXCLUDE_KEYWORDS = [
+  'defeat', 'defeats', 'defeated', 'beats', 'beat', 'wins the series', 'win the series',
+  'grand final', 'grand finals', 'advance to', 'advances to', 'qualify for', 'qualifies for',
+  'clinch', 'clinches', 'upset win', 'comeback win', 'match recap', 'highlights',
+  'best plays', 'mvp of the', 'series score', 'final score', 'takes down', 'sweep', 'swept',
+  'bracket reset', 'lower bracket', 'upper bracket', 'playoffs bracket', 'standings update',
+  'group stage results', 'round of 16', 'quarterfinal', 'semifinal result', 'tournament preview',
+  'power ranking', 'tier list', 'meta report', 'patch notes', 'roster ranking',
+];
 
-استبعد المقال (include=false) إذا كان يقتصر على أحد هذه الأنواع بلا أي زاوية أخرى:
-- نتيجة مباراة أو سلسلة مباريات (من فاز ومن خسر والنتيجة)
-- تتويج ببطولة أو مركز في الترتيب (standings)
-- تحليل تكتيكي أو ميتا اللعبة (أبطال، أسلحة، خرائط، بناء عناصر) دون أي بعد شخصي أو جدلي
-- توقعات نتائج مباريات قادمة
-- إحصاءات أداء داخل بطولة (KDA، معدل فوز، إلخ) دون قصة أو جدل حولها
-- ملاحظات تحديثات وباتشات تقنية للعبة نفسها لا علاقة لها بلاعب أو فريق أو قضية
+// كلمات تدل بقوة على أن الخبر ضمن نطاق البوت (قضايا، جدل، لاعبون، فرق، قوانين، صناعة)
+const INCLUDE_KEYWORDS = [
+  'ban', 'bans', 'banned', 'suspend', 'suspends', 'suspended', 'suspension',
+  'investigation', 'investigating', 'investigated', 'scandal', 'fine', 'fined',
+  'penalty', 'penalties', 'lawsuit', 'sues', 'sued', 'court', 'legal action',
+  'visa', 'government', 'regulation', 'match-fixing', 'match fixing', 'matchfixing',
+  'betting scandal', 'doping', 'cheat', 'cheating', 'cheater', 'anti-cheat', 'vac ban', 'esic',
+  'harassment', 'abuse', 'allegation', 'allegations', 'retire', 'retirement', 'retires',
+  'resign', 'resigns', 'steps down', 'disband', 'disbanded', 'bankrupt', 'financial trouble',
+  'dispute', 'contract dispute', 'interview', 'apology', 'apologizes', 'statement',
+  'backlash', 'criticism', 'boycott', 'protest', 'sponsorship deal', 'acquisition',
+  'acquires', 'investment', 'funding round', 'shuts down', 'shutting down', 'lays off',
+  'layoffs', 'controversy', 'controversial', 'discrimination', 'racism', 'racist',
+  'sexism', 'sexist', 'homophobia', 'homophobic', 'death threat', 'threats',
+  'diagnosed', 'health issue', 'mental health', 'passed away', 'tribute', 'homelessness',
+  'jordan', 'jordanian',
+];
 
-اشمل المقال (include=true) إذا كان عن أي من هذه (حتى لو ذُكرت داخله نتيجة مباراة كسياق فرعي):
-- قضايا وجدل: فضائح، عقوبات، حظر (بما فيها حظر الغش وanti-cheat وESIC)، تحقيقات، تلاعب بالنتائج (match-fixing)، مراهنات، اتهامات تحرش أو إساءة
-- قوانين وتشريعات: قرارات حكومية أو رسمية تخص الألعاب أو الإسبورتس في أي دولة، تأشيرات سفر لمنتخبات، قضايا قانونية أو حقوق رقمية
-- شؤون الفرق والمنظمات: مشاكل مالية، إفلاس، حل فريق، نزاع ملكية، خلافات داخلية، صفقات رعاية وأعمال
-- اللاعبون والشخصيات: قصص شخصية، مقابلات، اعتزال، تصريحات، خلافات عقود، قصص حياتية
-- المشهد المحلي والعربي: أي شيء يخص دولة ولاعبيها أو فرقها أو اتحادها الرياضي للألعاب الإلكترونية
-- ثقافة الألعاب والنقاش المجتمعي: قضايا جدلية مطروحة للنقاش في المجتمع (حتى لو لم يكن هناك "طرف مذنب")
-- صناعة وأعمال: استثمارات، إغلاق شركات، تغييرات في البطولات كصناعة، تقارير مشاهدات وسوق
+const GAME_KEYWORDS = [
+  { name: 'CS2', patterns: ['counter-strike', 'cs2', 'csgo'] },
+  { name: 'Dota 2', patterns: ['dota 2', 'dota2'] },
+  { name: 'League of Legends', patterns: ['league of legends'] },
+  { name: 'Valorant', patterns: ['valorant'] },
+  { name: 'Call of Duty', patterns: ['call of duty'] },
+  { name: 'PUBG Mobile', patterns: ['pubg mobile', 'pubgm'] },
+  { name: 'MLBB', patterns: ['mobile legends', 'mlbb'] },
+  { name: 'Overwatch', patterns: ['overwatch'] },
+  { name: 'Rainbow Six Siege', patterns: ['rainbow six', 'r6 siege'] },
+  { name: 'Apex Legends', patterns: ['apex legends'] },
+  { name: 'Fortnite', patterns: ['fortnite'] },
+  { name: 'Rocket League', patterns: ['rocket league'] },
+  { name: 'EA SPORTS FC', patterns: ['ea sports fc', 'fifa'] },
+];
 
-عند الشك بين نتيجة مباراة بحتة وقضية حقيقية، افضّل الاستبعاد فقط إذا كانت المباراة/النتيجة هي محور الخبر الوحيد بلا أي بعد إنساني أو جدلي أو مؤسسي.
-
-أعد الإجابة بصيغة JSON فقط بدون أي نص أو شرح أو علامات markdown قبله أو بعده، بالضبط بهذا الشكل:
-{
-  "include": true أو false,
-  "category": "قيمة واحدة من: Competitive, Transfers & Rosters, Teams & Orgs, Business & Industry, Law & Regulation, Gaming Culture, Community & Local Scene, Tech & Platforms, Player & Personalities",
-  "game_title": "اسم اللعبة بالإنجليزية كما في Liquipedia، أو Multi-title أو Industry (no single title) إن لم تخص لعبة واحدة",
-  "story_type": "قيمة واحدة من: Match result, Tournament win, Standings update, Tournament Stats, Roster move, Official announcement, Business & sponsorship, Schedule & qualification, Stats & viewership, Investigation, Controversy & discipline, Platform integrity & anti-cheat, Record, Feature & analysis, Community & local scene",
-  "arab_scene_relevance": "High أو Medium أو Low",
-  "sensitivity": "High أو Medium أو Low",
-  "jordan_related": true أو false,
-  "headline_ar": "صياغة عربية مختصرة من عندك لجوهر الخبر (وليست ترجمة حرفية)، لا تتجاوز 12 كلمة",
-  "reason_ar": "سبب القرار في جملة عربية قصيرة جداً"
-}`;
-
-function buildUserMessage(article) {
-  return [
-    `المصدر: ${article.sourceName}`,
-    `العنوان: ${article.title}`,
-    article.description ? `الملخص: ${article.description}` : null,
-    article.pubDate ? `تاريخ النشر: ${article.pubDate}` : null,
-  ].filter(Boolean).join('\n');
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function safeParseJson(text) {
-  let cleaned = text.trim().replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const start = cleaned.indexOf('{');
-    const end = cleaned.lastIndexOf('}');
-    if (start === -1 || end === -1 || end <= start) throw new Error('لا يوجد JSON صالح في الرد');
-    return JSON.parse(cleaned.slice(start, end + 1));
+// يبني تعبيراً نمطياً يطابق الكلمة/العبارة كوحدة كاملة فقط (حدود كلمة حقيقية)،
+// لتفادي مشاكل مثل مطابقة "layoffs" داخل كلمة "playoffs" الفرعية.
+function wordRegex(phrase) {
+  return new RegExp(`\\b${escapeRegex(phrase)}\\b`, 'i');
+}
+
+function findKeyword(haystack, keywords) {
+  return keywords.find((kw) => wordRegex(kw).test(haystack));
+}
+
+function detectGame(text) {
+  const lower = text.toLowerCase();
+  for (const game of GAME_KEYWORDS) {
+    if (game.patterns.some((p) => lower.includes(p))) return game.name;
   }
+  return 'Multi-title';
 }
 
-async function classifyArticle(article) {
-  try {
-    const response = await fetch('https://models.github.ai/inference/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: AI_MODEL,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: buildUserMessage(article) },
-        ],
-        max_tokens: 500,
-      }),
-    });
+function classifyArticle(article) {
+  const haystack = `${article.title} ${article.description}`.toLowerCase();
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`GitHub Models API ${response.status}: ${errText.slice(0, 300)}`);
-    }
+  const matchedInclude = findKeyword(haystack, INCLUDE_KEYWORDS);
+  const matchedExclude = findKeyword(haystack, EXCLUDE_KEYWORDS);
 
-    const data = await response.json();
-    const text = data?.choices?.[0]?.message?.content;
-    if (!text) throw new Error('لا يوجد نص في رد النموذج');
-
-    const parsed = safeParseJson(text);
-    if (typeof parsed.include !== 'boolean') throw new Error('حقل include مفقود أو غير صالح');
-    return parsed;
-  } catch (err) {
-    console.warn(`فشل تصنيف المقال "${article.title}": ${err.message}`);
+  if (matchedInclude) {
     return {
-      include: false, category: null, game_title: null, story_type: null,
-      arab_scene_relevance: null, sensitivity: null, jordan_related: false,
-      headline_ar: null, reason_ar: 'فشل التصنيف الآلي، تم التجاوز احترازياً',
-      classification_failed: true,
+      include: true,
+      game: detectGame(haystack),
+      jordanRelated: wordRegex('jordan').test(haystack),
+      reason: `تطابق كلمة: "${matchedInclude}"`,
     };
   }
+
+  if (matchedExclude) {
+    return {
+      include: false,
+      reason: `استُبعد لاحتوائه على: "${matchedExclude}"`,
+    };
+  }
+
+  return {
+    include: false,
+    reason: 'لا توجد كلمة مفتاحية واضحة (قبول أو استبعاد)',
+  };
 }
 
 // ------------------- النشر عبر Discord Webhook -------------------
-const SENSITIVITY_COLOR = { High: 0xe53935, Medium: 0xfb8c00, Low: 0x546e7a };
-function colorFor(sensitivity) { return SENSITIVITY_COLOR[sensitivity] || 0x5865f2; }
 function truncate(text, max) { return text && text.length > max ? `${text.slice(0, max - 1)}…` : text; }
 
 function buildEmbed(article, classification) {
   const embed = {
-    title: truncate(classification.headline_ar || article.title, 256),
-    color: colorFor(classification.sensitivity),
+    title: truncate(article.title, 256),
+    color: 0x5865f2,
     fields: [
-      { name: 'Category', value: String(classification.category || 'غير محدد'), inline: true },
-      { name: 'Game/Title', value: String(classification.game_title || 'غير محدد'), inline: true },
-      { name: 'Story type', value: String(classification.story_type || 'غير محدد'), inline: true },
-      { name: 'Arab-scene relevance', value: String(classification.arab_scene_relevance || 'غير محدد'), inline: true },
-      { name: 'Sensitivity', value: String(classification.sensitivity || 'غير محدد'), inline: true },
-      { name: 'الأردن', value: classification.jordan_related ? 'نعم' : 'لا', inline: true },
-      { name: 'العنوان الأصلي', value: truncate(article.title, 1024) },
+      { name: 'Game/Title', value: classification.game || 'Multi-title', inline: true },
+      { name: 'الأردن', value: classification.jordanRelated ? 'نعم' : 'لا', inline: true },
     ],
     footer: { text: `المصدر: ${article.sourceName}` },
   };
   if (article.link) embed.url = article.link;
-  if (classification.reason_ar) embed.fields.push({ name: 'ملاحظة التصنيف', value: truncate(classification.reason_ar, 300) });
+  if (article.description) embed.description = truncate(article.description, 500);
+  if (classification.reason) {
+    embed.fields.push({ name: 'سبب التطابق', value: truncate(classification.reason, 300) });
+  }
   if (article.pubDate) {
     const date = new Date(article.pubDate);
     if (!Number.isNaN(date.getTime())) embed.timestamp = date.toISOString();
@@ -316,27 +304,23 @@ async function main() {
   }
 
   const toProcess = freshArticles.slice(0, MAX_NEW_PER_RUN);
-  let included = 0, excluded = 0, failed = 0;
+  let included = 0, excluded = 0;
 
   for (const article of toProcess) {
-    const classification = await classifyArticle(article);
-    if (classification.classification_failed) {
-      failed += 1;
+    const classification = classifyArticle(article);
+    if (classification.include) {
+      const posted = await postToDiscord(article, classification);
+      if (posted) included += 1;
     } else {
-      if (classification.include) {
-        const posted = await postToDiscord(article, classification);
-        if (posted) included += 1;
-      } else {
-        excluded += 1;
-      }
-      seenMap[article.link] = Date.now();
+      excluded += 1;
     }
+    seenMap[article.link] = Date.now();
   }
 
   pruneOld(seenMap);
   saveSeen(seenMap);
 
-  console.log(`انتهت الدورة: نُشر ${included}، استُبعد ${excluded}، فشل تصنيف ${failed}.`);
+  console.log(`انتهت الدورة: نُشر ${included}، استُبعد ${excluded}.`);
 }
 
 main().catch((err) => {
