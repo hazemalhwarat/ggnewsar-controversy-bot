@@ -551,14 +551,16 @@ async function main() {
       const posted = await postToDiscord(article, classification);
       if (posted) {
         publishedCount += 1;
+        seenMap[article.link] = Date.now(); // نجح الإرسال فعلياً → يُسجَّل كمقروء
       } else {
         sendFailedCount += 1;
         sendFailures.push(article.title);
+        // مهم جداً: لا نُسجّله كمقروء — يبقى بالقائمة ليُعاد نشره تلقائياً بالتشغيلة القادمة
       }
     } else {
       excludedCount += 1;
+      seenMap[article.link] = Date.now(); // استُبعد فعلاً (لا يخص لاعباً) → لا داعي لإعادة فحصه
     }
-    seenMap[article.link] = Date.now();
   }
 
   pruneOld(seenMap);
