@@ -1,4 +1,4 @@
-name: Check esports news
+name: Check esports player news
 
 on:
   schedule:
@@ -7,7 +7,10 @@ on:
 
 permissions:
   contents: write
-  models: read
+
+concurrency:
+  group: players-bot
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -24,7 +27,6 @@ jobs:
       - name: Run bot
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/bot.mjs
 
       - name: Commit updated seen.json
