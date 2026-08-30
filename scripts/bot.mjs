@@ -15,7 +15,21 @@
 
 import fs from 'node:fs';
 
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+// ينظف الرابط من مسافات/علامات اقتباس قد تُلصق بالخطأ عند حفظ السيكريت
+function sanitizeWebhookUrl(raw) {
+  if (!raw) return '';
+  let cleaned = raw.trim();
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned;
+}
+
+const DISCORD_WEBHOOK_URL = sanitizeWebhookUrl(process.env.DISCORD_WEBHOOK_URL);
+const WEBHOOK_SHAPE_REGEX = /^https:\/\/(discord|discordapp)\.com\/api\/webhooks\/\d+\/\S+$/;
 const SEEN_FILE = 'data/seen.json';
 const DEDUPE_LOOKBACK_DAYS = 14;
 const MAX_NEW_PER_RUN = 100;
@@ -25,9 +39,57 @@ const MAX_ARTICLE_AGE_HOURS = 24;
 // واضحة تخص لاعباً (سيزيد ذلك الضجيج بشكل كبير: سكنات، أدلة، تحديثات... إلخ).
 const INCLUDE_WHEN_NO_SIGNAL = false;
 
-if (!DISCORD_WEBHOOK_URL) {
-  console.error('متغير البيئة المطلوب مفقود: DISCORD_WEBHOOK_URL');
+// ------------------- تقرير الملخص (يظهر أعلى صفحة التشغيلة في GitHub Actions) -------------------
+function appendSummary(markdown) {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (!summaryPath) return;
+  try {
+    fs.appendFileSync(summaryPath, `${markdown}\n`);
+  } catch {
+    // تجاهل أي خطأ بكتابة الملخص، لا يجب أن يوقف تشغيل البوت
+  }
+}
+
+function failFast(userMessage, summaryMessage) {
+  console.error(`::error::${userMessage}`);
+  appendSummary(`## ❌ فشل تشغيل البوت\n\n${summaryMessage}\n`);
   process.exit(1);
+}
+
+if (!DISCORD_WEBHOOK_URL) {
+  failFast(
+    'متغير البيئة المطلوب مفقود: DISCORD_WEBHOOK_URL',
+    'السيكريت `DISCORD_WEBHOOK_URL` غير موجود إطلاقاً بإعدادات الريبو (Settings ← Secrets and variables ← Actions).'
+  );
+}
+
+if (!WEBHOOK_SHAPE_REGEX.test(DISCORD_WEBHOOK_URL)) {
+  failFast(
+    'رابط DISCORD_WEBHOOK_URL له شكل غير صحيح',
+    'الرابط المحفوظ بالسيكريت `DISCORD_WEBHOOK_URL` لا يطابق شكل رابط ويبهوك ديسكورد الصحيح ' +
+      '(`https://discord.com/api/webhooks/<id>/<token>`). تحقق من نسخه كاملاً بدون مسافات أو أسطر إضافية.'
+  );
+}
+
+// فحص صحة الويبهوك فعلياً قبل البدء (طلب GET بسيط، بدون إرسال أي رسالة)
+async function verifyWebhookIsAlive() {
+  try {
+    const response = await fetch(DISCORD_WEBHOOK_URL, { method: 'GET' });
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => '');
+      failFast(
+        `رابط الويبهوك مرفوض من Discord (HTTP ${response.status})`,
+        `Discord رفض رابط الويبهوك المحفوظ بالسيكريت (HTTP ${response.status}). ` +
+          'على الأغلب الويبهوك انحذف أو دُوِّر من إعدادات القناة، ولازم تحدّث السيكريت `DISCORD_WEBHOOK_URL` برابط جديد.\n\n' +
+          `رد Discord: \`${bodyText.slice(0, 300)}\``
+      );
+    }
+  } catch (err) {
+    failFast(
+      `تعذّر الاتصال برابط الويبهوك: ${err.message}`,
+      `فشل الاتصال بالكامل برابط الويبهوك (خطأ شبكة): \`${err.message}\``
+    );
+  }
 }
 
 // ------------------- المصادر -------------------
@@ -436,6 +498,8 @@ async function fetchAllArticles() {
 }
 
 async function main() {
+  await verifyWebhookIsAlive();
+
   const seenMap = loadSeen();
   const isFirstRun = Object.keys(seenMap).length === 0;
 
@@ -454,6 +518,11 @@ async function main() {
     notSeen.forEach((a) => { seenMap[a.link] = Date.now(); });
     saveSeen(seenMap);
     console.log(`دورة التهيئة الأولى: سُجّل ${notSeen.length} مقال كمقروء بدون نشر (لتفادي إغراق القناة بمحتوى قديم). النشر يبدأ من الدورة التالية.`);
+    appendSummary(
+      `## ℹ️ دورة التهيئة الأولى\n\n` +
+        `تم تسجيل **${notSeen.length}** مقال كمقروء بدون نشر لتفادي إغراق القناة بمحتوى قديم. ` +
+        `النشر الفعلي يبدأ من الدورة القادمة.`
+    );
     return;
   }
 
@@ -471,15 +540,23 @@ async function main() {
   console.log(`جديدة خلال آخر ${MAX_ARTICLE_AGE_HOURS} ساعة: ${freshArticles.length}، أقدم وتم تجاهلها: ${expiredOld}`);
 
   const toProcess = freshArticles.slice(0, MAX_NEW_PER_RUN);
-  let included = 0, excluded = 0;
+  let publishedCount = 0;
+  let excludedCount = 0;
+  let sendFailedCount = 0;
+  const sendFailures = [];
 
   for (const article of toProcess) {
     const classification = classifyArticle(article);
     if (classification.include) {
       const posted = await postToDiscord(article, classification);
-      if (posted) included += 1;
+      if (posted) {
+        publishedCount += 1;
+      } else {
+        sendFailedCount += 1;
+        sendFailures.push(article.title);
+      }
     } else {
-      excluded += 1;
+      excludedCount += 1;
     }
     seenMap[article.link] = Date.now();
   }
@@ -487,10 +564,34 @@ async function main() {
   pruneOld(seenMap);
   saveSeen(seenMap);
 
-  console.log(`انتهت الدورة: نُشر ${included}، استُبعد ${excluded}.`);
+  console.log(
+    `انتهت الدورة: نُشر ${publishedCount}، استُبعد (لا يخص لاعباً) ${excludedCount}، فشل إرسالها فعلياً ${sendFailedCount}.`
+  );
+
+  const failedSourcesNote = sendFailedCount > 0
+    ? `\n\n### ⚠️ تحذير: فشل إرسال ${sendFailedCount} خبر فعلياً لـ Discord\n\n` +
+      `هذا يعني الويبهوك رفض الطلب رغم اجتيازه فحص الاتصال الأولي (على الأغلب Rate Limit مؤقت أو خطأ عابر). ` +
+      `العناوين المتأثرة:\n` +
+      sendFailures.slice(0, 10).map((t) => `- ${t}`).join('\n')
+    : '';
+
+  appendSummary(
+    `## ✅ ملخص التشغيلة\n\n` +
+      `| المقياس | العدد |\n|---|---|\n` +
+      `| مقالات مجلوبة | ${articles.length} |\n` +
+      `| بعد إزالة التكرار | ${deduped.length} |\n` +
+      `| غير مسجلة سابقاً | ${notSeen.length} |\n` +
+      `| ضمن آخر ${MAX_ARTICLE_AGE_HOURS} ساعة | ${freshArticles.length} |\n` +
+      `| أقدم وتم تجاهلها | ${expiredOld} |\n` +
+      `| **نُشر فعلياً بـ Discord** | **${publishedCount}** |\n` +
+      `| استُبعد (لا يخص لاعباً) | ${excludedCount} |\n` +
+      `| فشل إرسالها فعلياً | ${sendFailedCount} |\n` +
+      failedSourcesNote
+  );
 }
 
 main().catch((err) => {
-  console.error('خطأ غير متوقع:', err);
+  console.error('::error::خطأ غير متوقع:', err);
+  appendSummary(`## ❌ خطأ غير متوقع\n\n\`\`\`\n${err.stack || err.message}\n\`\`\``);
   process.exit(1);
 });
