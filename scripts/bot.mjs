@@ -18,9 +18,9 @@ import fs from 'node:fs';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const SEEN_FILE = 'data/seen.json';
 const DEDUPE_LOOKBACK_DAYS = 14;
-const MAX_NEW_PER_RUN = 50;
+const MAX_NEW_PER_RUN = 100;
 // أي مقال أقدم من هذا العدد من الساعات (حسب تاريخ نشره الفعلي في المصدر) يُتجاهل.
-const MAX_ARTICLE_AGE_HOURS = 36;
+const MAX_ARTICLE_AGE_HOURS = 24;
 // اجعلها true إذا أردت البوت أن يرسل "كل شيء" حتى المقالات التي لا تحمل أي إشارة
 // واضحة تخص لاعباً (سيزيد ذلك الضجيج بشكل كبير: سكنات، أدلة، تحديثات... إلخ).
 const INCLUDE_WHEN_NO_SIGNAL = false;
